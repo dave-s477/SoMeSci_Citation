@@ -1,0 +1,1365 @@
+---
+title: "A multi-level analysis of data quality for formal software citation"
+author: "David Schindler and Frank Krüger"
+format: html
+toc: false
+code-line-numbers: true
+editor: visual
+execute: 
+  warning: false
+suppress-bibliography: true
+---
+
+# A multi-level analysis of data quality for formal software citation
+
+1.  What types of resources are referenced by formal software citations?
+2.  Is software formally cited without being mentioned in the full-text document?
+3.  Do formal software references provide all necessary information to identify software, developer, and the used code base?
+4.  How well are formal software references represented in scientific literature databases?
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(DescTools)
+library(ggalluvial)
+library(easyalluvial)
+library(xtable)
+library(rcompanion)
+
+options(xtable.floating = FALSE)
+options(xtable.timestamp = "")
+options(warn=-1)
+options(dplyr.summarise.inform = FALSE)
+
+theme_set(theme_bw() +   
+            theme(legend.position = 'top', 
+                  strip.background = element_rect(fill="#E5E5E5"), 
+                  plot.margin = unit(c(0,2,0,0), 'mm'),
+                  legend.margin=margin(0,0,0,0),
+                  legend.box.margin=margin(0,0,-5,0),
+                  plot.caption.position = "plot",
+                  plot.caption = element_text(hjust = 0),
+                  plot.tag.position = "bottomleft")
+)
+```
+
+## Citation Resource Types
+
+The first analysis investigates the different types of resources that are referenced by formal software citations that appear in-text in the context of an informal software mention.
+
+First up the required data is loaded. As outlined in the article, creation sentences are excluded for this analyses as they might add a bias.
+
+```{r}
+creation_articles <- read_csv('SoMeSci/Formal_Citation/creation_file_list.csv', 
+                              show_col_types = F)
+df_citation_types <- read_csv('SoMeSci/Formal_Citation/software_citation_type_annotation.csv', 
+                              show_col_types = F) %>% 
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Book', 
+    'Software_Article', 
+    software_citation_type)) %>%
+  mutate(paper = gsub(
+    'https://www.ncbi.nlm.nih.gov/pmc/articles/', 
+    '', 
+    paper)) %>%
+  select(-software) %>%
+  distinct()
+```
+
+We look at the number of annotated references; filter for creation sentences; remove annotations that were found to not be software references; calculate multinomial confidence intervals for the relevant data.
+
+```{r}
+# Overall annotations
+print(paste0("Number of annotations: ", nrow(df_citation_types)))
+
+# Exclude Creation sentences 
+df_citation_types %<>%
+  filter(!paper %in% creation_articles$creation_file_list)
+print(paste0(
+  "Number of annotations without Creation Sentences: ", 
+  nrow(df_citation_types)))
+
+# Analyze and exclude irrelevant types
+order <- c('Direct', 'Software_Article', 'Manual', 'Website', 'Other')
+df_citation_types %>% 
+  filter(!software_citation_type %in% order) %>%
+  group_by(software_citation_type) %>%
+  summarize(n=n()) %>%
+  print(.)
+
+df_citation_types %<>% 
+  filter(software_citation_type %in% order) 
+print(paste0("Number of relevant annotations: ", nrow(df_citation_types)))  
+
+# Calculate CIs
+df_citation_types %>%
+  group_by(software_citation_type) %>%
+  summarize(n=n()) -> df_tmp
+df_tmp_2 <- data.frame(MultinomCI(df_tmp$n, conf.level = 0.95))
+df <- bind_cols(df_tmp, df_tmp_2)
+
+print(mutate(df, across(3:5, round, 3)))
+
+```
+
+Plotting the results:
+
+```{r}
+
+df %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Software_Article', 
+    'Article', 
+    software_citation_type)) %>%
+  mutate(software_citation_type = factor(
+    software_citation_type, 
+    levels=c('Direct', 'Article', 'Manual', 'Website', 'Other'))) %>%
+  ggplot(aes(software_citation_type, est)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin=lwr.ci, ymax=upr.ci), width=.5)+
+  labs(x="Citation Type", y = "Relative Amount") +
+  scale_y_continuous(breaks = c(0, 0.2, 0.4, 0.6),
+                     labels = c("0%", "20%", "40%", "60%")) +
+  facet_wrap(~ "Distribution of Citation Types", nrow=2, scales='free_y') -> 
+  p_out
+
+ggsave('citation_type_amounts.jpg', p_out, width = 8, height = 2.5)
+
+p_out <- p_out + labs(x="Citation Type", y = "Relative Amount",
+       caption="Fig S1 (Article Fig 3): Relative amount of different 
+       software citation types with confidence intervals.")
+print(p_out)
+
+```
+
+Looking at the interaction between resource type and provided meta-data in the informal mention. This allows to determine if authors provide additional meta-data missing from formal references in the articles full-text document.
+
+```{r}
+# Reloading the annotation data because we need the exact software mention 
+# string that was removed as duplicates before
+df_citation_types <- read_csv('SoMeSci/Formal_Citation/software_citation_type_annotation.csv') %>% 
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Book', 
+    'Software_Article', 
+    software_citation_type)) %>%
+  mutate(paper = gsub(
+    'https://www.ncbi.nlm.nih.gov/pmc/articles/', 
+    '', 
+    paper)) %>%
+  distinct() %>%
+  filter(!paper %in% creation_articles$creation_file_list) %>% 
+  filter(software_citation_type %in% order) 
+
+# Loading original SoMeSci data
+df_software <- read_csv('SoMeSci/Formal_Citation/software_sparql.csv')
+
+# Matching the dataframes
+df_software %>%
+  mutate(article = gsub('http://data.gesis.org/somesci/', '', article)) %>%
+  select(sw_identity, spelling, article, cit_string) %>%
+  distinct() %>%
+  right_join(
+    df_citation_types, 
+    by=c('article'='paper', 'spelling'='software', 'cit_string'='citation')) %>%
+  select(-c(spelling, cit_string, citation_index)) -> 
+  df_citations 
+
+# Transforming results and calculating binomial CIs
+# Website and Other are not included because there are to few samples
+df_software %>%
+  mutate(
+    ver_string = ifelse(is.na(ver_string), FALSE, TRUE), 
+    cit_string = ifelse(is.na(cit_string), FALSE, TRUE), 
+    dev_string = ifelse(is.na(dev_string), FALSE, TRUE), 
+    rel_string = ifelse(is.na(rel_string), FALSE, TRUE), 
+    url_string = ifelse(is.na(url_string), FALSE, TRUE),
+    ext_string = ifelse(is.na(ext_string), FALSE, TRUE),
+    abb_string = ifelse(is.na(abb_string), FALSE, TRUE),
+    alt_string = ifelse(is.na(alt_string), FALSE, TRUE)
+  ) %>% 
+  mutate(
+    ver_string = ifelse(ver_string | rel_string, TRUE, FALSE), 
+    alt_string = ifelse(abb_string | alt_string, TRUE, FALSE)) %>%
+  select(-c(spelling, lic_string, abb_string, rel_string)) %>%
+  group_by(sw_identity, article) %>%
+  summarize(
+    ver_string = any(ver_string),
+    dev_string = any(dev_string),
+    cit_string = any(cit_string),
+    url_string = any(url_string),
+    ext_string = any(ext_string),
+    alt_string = any(alt_string)
+    , .groups='drop') %>%
+  mutate(article = gsub('http://data.gesis.org/somesci/', '', article)) %>%
+  left_join(df_citations, by=c('sw_identity', 'article')) %>% 
+  mutate(
+    software_citation_type=ifelse(
+      is.na(software_citation_type), 
+      'None', 
+      software_citation_type)) -> df_tmp #%>%
+
+df_tmp %>% 
+  filter(software_citation_type %in% c('None', 'Software_Article')) %>%
+  mutate(software_citation_type = ifelse(software_citation_type == 'None', 1, 0)) %>%
+  mutate(ver_string = ifelse(ver_string, 1, 0)) -> df_test
+
+# Performing a Chi-sq test to evaluate if the probability for providing a 
+# software mention in the article full-text document differs between 
+# software cited with a software articles and software not cited at all. 
+# And assessing the extent of the effect.  
+nrow(df_test)
+chisq.test(df_test$software_citation_type, df_test$ver_string)
+cramerV(df_test$software_citation_type, df_test$ver_string)
+cohenW(df_test$software_citation_type, df_test$ver_string)
+
+df_tmp %>%
+  group_by(software_citation_type) %>%
+  mutate(n_software = n()) %>%
+  group_by(software_citation_type, n_software) %>%
+  summarize(across(3:8, sum)) %>%
+  pivot_longer(!c(software_citation_type, n_software)) %>%
+  mutate(rel=value / n_software) %>%
+  mutate(MoE = sqrt((rel * (1-rel))/n_software) * 1.96) %>%
+  mutate(CIl = rel-MoE, CIu = rel + MoE) %>%
+  mutate(rel=rel*100, CIu=CIu*100, CIl=CIl*100) %>%
+  mutate(CIu = pmin(CIu, 100), CIl = pmax(CIl, 0)) %>%
+  filter(!name %in% c('cit_string', 'ext_string')) %>%
+  ungroup() %>%
+  mutate(name=recode(name, 
+                     ver_string='Version', 
+                     dev_string='Developer', 
+                     url_string='URL', 
+                     alt_string='Alternative Name', 
+                     ext_string='Extension')) %>%
+  mutate(name=factor(name, level=c('Version', 
+                                   'Developer', 
+                                   'URL', 
+                                   'Alternative Name', 
+                                   'Extension'))) %>%
+  mutate(software_citation_type=factor(
+    software_citation_type, 
+    level=c('None', 'Software_Article', 'Direct', 
+            'Manual', 'Website', 'Other'))) %>%
+  filter(! software_citation_type %in% c('Website', 'Other')) %>%
+  print(., n=16) -> df_plot
+
+# Plotting the results
+df_plot %>%
+  ggplot(., aes(software_citation_type,rel, color=name)) +
+  geom_point(position=position_dodge(width=.7)) +
+  geom_errorbar(aes(ymin=CIl, ymax=CIu), 
+                width=.5, position=position_dodge(width=.7)) +
+  labs(x='Information',
+       y='Rel. Number of Mentions (%)') +
+  scale_color_manual('Software', values=c('#bee383', '#fdcb97', '#bdc9e1', '#e0c2cd')) -> 
+  p_out
+
+ggsave('completeness_with_informal.jpg', p_out, width = 8, height = 2.5)
+
+p_out <- p_out + labs(caption="Fig S2 (Article Fig 4): Relative amount of meta-data 
+       provided with respect to the formal citation type. Software 
+       mentions that were not formally cited are aggregated under 
+       label ''None''. 95% CIs are shown.")
+print(p_out)
+```
+
+## Formal Software Citation without in-text Software Mention
+
+All references were annotated in order to identify instances of direct software citations, manual citations, and software website citations that are not connected to an in-text software mention. Here, the amount of relevant cases is counted and set in context to the number of samples with in-text software mentions to determine how often this is actually the case in practice.
+
+First, the data is loaded. Since the references were only annotated for PLoS methods and PubMed full-texts of the [SoMeSci](https://data.gesis.org/somesci/) data set, the remaining resource type annotations are excluded.
+
+```{r}
+df_new_citation_types <- read_csv('SoMeSci/Formal_Citation/software_citation_type_annotation_without_intext_mention.csv', 
+                                  show_col_types = F) %>%
+  select(-software)
+df_plos_and_pubmed <- read_csv('SoMeSci/Formal_Citation/fulltext_and_methods_list.csv', 
+                               show_col_types = F)
+df_citation_types <- read_csv('SoMeSci/Formal_Citation/software_citation_type_annotation.csv', 
+                              show_col_types = F) %>% 
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Book', 
+    'Software_Article', 
+    software_citation_type)) %>%
+  mutate(paper = gsub('https://www.ncbi.nlm.nih.gov/pmc/articles/', 
+                      '', 
+                      paper)) %>%
+  select(-software) %>%
+  distinct() %>%
+  filter(paper %in% df_plos_and_pubmed$list) %>% 
+  filter(software_citation_type %in% c('Direct', 'Manual', 'Website')) 
+```
+
+Determining the amount of newly identified references:
+
+```{r}
+df_new_citation_types %>%
+  group_by(software_citation_type, outside) %>%
+  summarize(n_citations=n(), n_articles=n_distinct(paper)) %>% print(.)
+
+df_new_citation_types %>%
+  filter(!outside) %>%
+  group_by(reason) %>%
+  summarize(n=n()) %>% print(.)
+
+df_new_citation_types %>%
+  filter(!outside) %>%
+  filter(!reason %in% c('error', 'somesci error')) %>%
+  group_by(software_citation_type) %>%
+  summarize(n_new_citations=n(), n_new_articles=n_distinct(paper)) %>% 
+  print(.) -> 
+  df_tmp
+
+df_citation_types %>% 
+  group_by(software_citation_type) %>%
+  summarize(n_citations=n(), n_articles=n_distinct(paper)) %>%
+  inner_join(df_tmp, by='software_citation_type') %>%
+  mutate(rel = n_new_citations / (n_new_citations + n_citations))
+```
+
+## Citation Completeness
+
+In the next analyses step the completeness of formal references is analyzed. For this purpose, meta-data contained in formal references was systematically annotated. The data is analyzed in three steps: 1. the amount of provided meta-data is analyzed directly, 2. the provided meta-data is analyzed in terms of software identification, author attribution, and code base identification, and 3. the meta-data is analyzed in combination with meta-data from informal in-text software mentions.
+
+```{r}
+# Aggregated data on completeness from the annotation
+df_txt <- read_csv("SoMeSci/Formal_Citation/info_summary_txt.csv", 
+                   show_col_types = F) %>%
+  filter(!File %in% creation_articles$creation_file_list) 
+
+# File required for mapping annotations to original SoMeSci annotation
+df_map <- read_csv("SoMeSci/Formal_Citation/original_data_matching.csv", 
+                   show_col_types = F) %>% 
+  mutate(article = gsub('https://www.ncbi.nlm.nih.gov/pmc/articles/', '', article))
+
+df_txt %<>%
+  left_join(df_map, by=c('File'='article', 'Idx'='citation_id')) %>%
+  left_join(df_new_citation_types, by=c('File'='paper', 'Idx'='citation')) %>%
+  mutate(software_citation_type = ifelse(
+    is.na(cite_type), 
+    software_citation_type, 
+    cite_type)) %>%
+  select(-c(cite_type, outside, reason)) 
+```
+
+1.  Amount of provided meta-data
+
+```{r}
+order <- c('Name', 'Identifier', 'Archive', 'URL', 'Creator', 'Version', 
+           'PubDate_exact', 'PubDate_year', 'Date_of_access', 
+           'Description', 'Type_of_citation')
+print(paste0(nrow(df_txt), " references were analyzed for completeness"))
+
+df_txt %>%
+  rename(Identifier=ID) %>%
+  select(-software) %>%
+  distinct() %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Manual', 
+    'Manual', 
+    'Direct')) %>%
+  group_by(software_citation_type) %>%
+  mutate(n=n()) %>%
+  group_by(software_citation_type, n) %>%
+  summarize(across(Creator:License, sum)) %>%
+  pivot_longer(cols=!c(software_citation_type, n), 
+               names_to = "info", 
+               values_to = "c") %>%
+  mutate(rel = c/n) %>%
+  mutate(MoE = sqrt((rel * (1-rel))/n) * 1.96) %>%
+  mutate(CIu = rel + MoE, CIl = rel-MoE)  %>%
+  mutate(rel = rel*100, CIu=pmin(100, CIu*100), CIl=pmax(0, CIl*100)) %>%
+  filter(info %in% order) %>% 
+  mutate(info=factor(info, levels = order)) %>%
+  mutate(info = recode(info, 
+                       `PubDate_year`='Year', 
+                       `PubDate_exact`='Date', 
+                       `Date_of_access`='Access', 
+                       `Type_of_citation`='Type')) %>% 
+  print(., n=22) %>%
+  ggplot(aes(info, rel, color=software_citation_type)) + 
+  geom_point(position=position_dodge(width=.7)) + 
+  geom_errorbar(aes(ymin=CIl, ymax=CIu), 
+                width=.6, 
+                position=position_dodge(width=.7)) +
+  labs(x="Meta-data", y = "Relative Amount") +
+  scale_color_manual(values=c('#a6bae1', '#bee383')) +
+  scale_y_continuous(breaks = c(0, 20, 40, 60, 80, 100),
+                     labels = c("0%", "20%", "40%", "60%", "80%", "100%")) +
+  guides(color = guide_legend(nrow=1, title="Citation Type")) +
+  facet_wrap(~ "Amount of provided meta-data") -> p_out
+
+ggsave('completeness_info.jpg', p_out, width = 8, height = 2.5)
+
+p_out <- p_out + labs(caption="Fig S3 (Article Fig 5): Relative citation completeness with 95% CIs.")
+print(p_out)
+```
+
+2.  Identification, attribution, code base
+
+```{r}
+order = c('identifiable_creator', 
+          'identifiable_id', 
+          'identifiable_archive', 
+          'identifiable_precise',
+          'identifiable_url',
+          'identifiable_imprecise',
+          'creator_attribution',
+          'codebase_version',
+          'codebase_release',
+          'codebase_precise',
+          'codebase_doa',
+          'codebase_imprecise')
+
+order_n = c('creator', 
+          'id', 
+          'archive',
+          'version', 
+          'release',
+          'precise',
+          'url',
+          'doa',
+          'imprecise',
+          'attribution')
+
+# Identifiability of software
+df_txt %>%
+  mutate(identifiable_creator=Name & Creator) %>%
+  mutate(identifiable_id=ID) %>%
+  mutate(identifiable_archive=Archive) %>%
+  mutate(identifiable_precise=identifiable_creator | 
+           identifiable_id | 
+           identifiable_archive) %>%
+  mutate(identifiable_url=URL) %>%
+  mutate(identifiable_imprecise=identifiable_precise | identifiable_url) -> 
+  df_tmp
+
+# Creator attribution
+df_tmp %<>%
+  mutate(creator_attribution=identifiable_creator) 
+
+# Code base identification
+df_tmp %<>% 
+  mutate(codebase_release=PubDate_exact & identifiable_imprecise) %>% 
+  mutate(codebase_version=Version & identifiable_imprecise) %>%
+  mutate(codebase_precise=codebase_release | codebase_version) %>%
+  mutate(codebase_doa=Date_of_access & identifiable_imprecise) %>%
+  mutate(codebase_imprecise=codebase_precise | codebase_doa) 
+
+# Plotting
+df_tmp %>%
+  select(-c(software, Creator, Name, Archive, PubDate_year, PubDate_exact, 
+            PubDate_nd, ID, URL, Version, Date_of_access, Type_of_citation, 
+            Description, License)) %>%
+  distinct() %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Manual', 
+    'Manual', 
+    'Direct')) %>%
+  group_by(software_citation_type) %>%
+  mutate(n=n()) %>%
+  group_by(software_citation_type, n) %>%
+  summarize(across(identifiable_creator:codebase_imprecise, sum)) %>%
+  pivot_longer(cols=!c(software_citation_type, n), 
+               names_to = "info", 
+               values_to = "c") %>%
+  mutate(rel = c/n) %>%
+  mutate(MoE = sqrt((rel * (1-rel))/n) * 1.96) %>%
+  mutate(CIu = rel + MoE, CIl = rel-MoE)  %>%
+  mutate(rel = rel*100, CIu=pmin(CIu*100, 100), CIl=pmax(CIl*100,0)) %>%
+  mutate(info = factor(info, levels = order)) %>% 
+  separate(info, sep='_', into=c('Problem', 'quality')) %>%
+  mutate(quality = factor(quality, levels=order_n)) %>%
+  mutate(Problem = factor(Problem, levels=c('identifiable', 
+                                            'creator', 
+                                            'codebase'))) %>%
+  print(., n=24) %>%
+  ggplot(aes(quality, rel, color=software_citation_type)) + 
+  geom_point(position=position_dodge(width=.7)) + 
+  geom_errorbar(aes(ymin=CIl, ymax=CIu), 
+                width=.6, 
+                position=position_dodge(width=.7)) +
+  labs(x="Identifiability", y = "Relative Amount") +
+  scale_color_manual(values=c('#a6bae1', '#bee383')) +
+  scale_y_continuous(breaks = c(0, 20, 40, 60, 80, 100),
+                     labels = c("0%", "20%", "40%", "60%", "80%", "100%")) +
+  guides(color = guide_legend(nrow=1, title="Citation Type")) +
+  facet_grid(~Problem, scales = "free_x", space='free_x') -> p_out
+
+ggsave('completeness_identification.jpg', p_out, width = 8, height = 2.5)
+
+p_out <- p_out + labs(caption="Fig S4 (Article Fig 6): Relative citation completeness 
+       with confidence intervals. Regarding software identification, 
+       ''precise'' describes cases in which software is clearly 
+       identifiable, while ''imprecise'' includes cases where only a URL 
+       is provided as identifier, which is considered as unsuited to 
+       clearly identify a software with details outlined in the article.
+       Regarding codebase identification, the categories are defined 
+       similarly, with ''imprecise'' including cases where only a 
+       Date of Access is provided.")
+print(p_out)
+```
+
+3.  Informal and formal meta-data
+
+This step aggregates over formally and informally provided meta-data in order to determine the overall completeness. Therefore, this step is only performed for samples that have in-text software mentions and excluding the additional samples identified in the previous step.
+
+```{r}
+# Mapping all software names 
+df_software %>%
+  select(sw_identity, spelling) %>%
+  distinct() -> df_spell_map
+
+# Transforming the original SoMeSci information
+df_software %>%
+  mutate(
+    ver_string = ifelse(is.na(ver_string), FALSE, TRUE), 
+    dev_string = ifelse(is.na(dev_string), FALSE, TRUE), 
+    rel_string = ifelse(is.na(rel_string), FALSE, TRUE), 
+    url_string = ifelse(is.na(url_string), FALSE, TRUE),
+    ext_string = ifelse(is.na(ext_string), FALSE, TRUE),
+    abb_string = ifelse(is.na(abb_string), FALSE, TRUE),
+    alt_string = ifelse(is.na(alt_string), FALSE, TRUE),
+    cit_string = ifelse(is.na(cit_string), '', cit_string)
+  ) %>% 
+  mutate(ver_string = ifelse(
+    ver_string | rel_string, TRUE, FALSE), 
+    alt_string = ifelse(abb_string | alt_string, TRUE, FALSE)) %>%
+  select(-c(spelling, lic_string, abb_string, rel_string)) %>%
+  group_by(sw_identity, article) %>%
+  summarize(
+    ver_string = any(ver_string),
+    dev_string = any(dev_string),
+    url_string = any(url_string),
+    ext_string = any(ext_string),
+    alt_string = any(alt_string),
+    cit_string = max(cit_string)
+    , .groups='drop') %>%
+  mutate(article = gsub('http://data.gesis.org/somesci/', '', article)) %>%
+  filter(cit_string != "") %>%
+  distinct() -> df_tmp
+
+df_txt %>%
+  select(-c(Name, Archive, PubDate_year, PubDate_exact, PubDate_nd, ID, 
+            Date_of_access, Type_of_citation, Description, License)) %>%
+  inner_join(df_spell_map, by=c('software'='spelling')) %>%
+  inner_join(df_tmp, by=c('File'='article', 
+                          'original_cite'='cit_string', 
+                          'sw_identity'='sw_identity')) %>% 
+  select(-c(alt_string, ext_string, software, sw_identity)) %>%
+  distinct() %>%
+  select(-c(Manual, original_cite, cite_idx)) %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type == 'Manual', 
+    'Manual', 
+    'Direct')) %>%
+  group_by(software_citation_type) %>%
+  mutate(n=n()) %>%
+  rename(Version_informal=ver_string, 
+         Developer_informal=dev_string, 
+         URL_informal=url_string) %>%
+  rename(Version_formal=Version, 
+         Developer_formal=Creator, 
+         URL_formal=URL) %>%
+  mutate(Version_overall = Version_formal | Version_informal, 
+         Developer_overall = Developer_formal | Developer_informal, 
+         URL_overall = URL_formal | URL_informal) %>%
+  group_by(software_citation_type, n) %>%
+  summarize(across(!c(File, Idx), sum)) %>%
+  pivot_longer(cols=!c(software_citation_type, n), 
+               names_to = "info", 
+               values_to = "c") %>%
+  mutate(rel = c/n) %>%
+  mutate(MoE = sqrt((rel * (1-rel))/n) * 1.96) %>%
+  mutate(CIu = rel + MoE, CIl = rel-MoE)  %>%
+  mutate(rel = rel*100, CIu=CIu*100, CIl=pmax(0, CIl*100)) %>% 
+  mutate(CIu = pmin(CIu, 100), CIl = pmax(CIl, 0)) %>%
+  separate(info, into = c('Metadata', 'Citation Type')) %>%
+  mutate(Metadata=factor(Metadata, 
+                         level=c('Developer', 'Version', 'URL'))) %>% 
+  select(-c(c, n)) %>%
+  print(.) %>%
+  ggplot(aes(Metadata, rel, color=`Citation Type`)) + 
+  geom_point(position=position_dodge(width=.5)) +
+  geom_errorbar(aes(ymin=CIl, ymax=CIu), 
+                width=.4, 
+                position=position_dodge(width=.5)) +
+  labs(x='Information',
+       y='Relative Number of Mentions (%)',
+       caption="Figure S5: Relative citation completeness for direct citation and 
+       manual citation with respect to developer, version, and URL, considering 
+       formally provided, informally provided information, and their combination.") +
+  scale_color_manual(values=c('#a1dab4', '#41b6c4', '#225ea8')) +
+  facet_wrap(~software_citation_type) -> p_out
+
+print(p_out)
+
+ggsave('completeness_metadata_with_informal.jpg', p_out, width = 8, height = 2.5)
+```
+
+## Database Representation
+
+The database representation of formal software citations, manuals, and software websites was systematically annotated for the publisher's JATS XML representation, and the Semantic Scholar and Crossref entries. Aside from annotation if specific information is available it was also annotated if the information is structured, and whether it is correct. The corresponding references are analyzed by directly comparing their representation between the three sources.
+
+First, the required data is loaded. This is more complex as before as separate data for each representation is loaded and then matched together. Moreover, here it is not filtered for arrticles from the SoMeSci Creation sentences because they do not add a bias as we are only interested in how well they entries are represented and we can increase the sample size by adding them.
+
+```{r}
+# Loading required functions for plotting and output, 
+# that are too long for this file. 
+source("plot_function.R")
+
+# Aggregated data on completeness from the annotation
+df_txt <- read_csv("SoMeSci/Formal_Citation/info_summary_txt.csv", 
+                   show_col_types = F) %>%
+  mutate(source = "TXT") %>%
+  left_join(df_map, by=c('File'='article', 'Idx'='citation_id')) %>%
+  left_join(df_new_citation_types, by=c('File'='paper',
+                                        'Idx'='citation')) %>%
+  mutate(software_citation_type = ifelse(
+    is.na(cite_type),
+    software_citation_type, 
+    cite_type)) %>%
+  select(-c(cite_type, outside, reason, software)) %>% 
+  distinct()
+
+df_txt %>%
+  select(File, Idx, software_citation_type) -> df_tmp
+
+df_xml <- read_csv("SoMeSci/Formal_Citation/info_summary_xml.csv", 
+                   show_col_types = F) %>%
+  inner_join(df_tmp, by=c('File', 'Idx')) %>%
+  mutate(source="XML")
+
+df_sem <- read_csv("SoMeSci/Formal_Citation/info_summary_sem.csv", 
+                   show_col_types = F) %>%
+  inner_join(df_tmp, by=c('File', 'Idx')) %>%
+  mutate(source='SEM')
+
+df_cro <- read_csv("SoMeSci/Formal_Citation/info_summary_cro.csv", 
+                   show_col_types = F) %>%
+  inner_join(df_tmp, by=c('File', 'Idx')) %>%
+  mutate(source="CRO")
+
+list(df_txt, df_xml, df_sem, df_cro) %>%
+  bind_rows() ->
+  df
+
+df %<>%
+  mutate(missing = ifelse(reference_missing, 
+                          "reference_missing", 
+                          ifelse(article_missing, 
+                                 "article_missing",
+                                 "covered"))) 
+
+# Software article database availability annotation
+df_software_article <- read_csv("SoMeSci/Formal_Citation/software_article_reference_availability.csv", 
+                                show_col_types = F) 
+
+```
+
+Looking for duplicate entries that are sometimes present in databases, especially for Semantic Scholar. In case duplicate entries do exist, the one covering the most information is selected for subsequent analyses, where information is weighted
+
+```{r}
+# Looking at entries
+df %>% 
+  group_by(source, software_citation_type, File, Idx) %>% 
+  summarize(n=n()) %>% 
+  arrange(desc(n)) %>%
+  group_by(source, software_citation_type, n) %>% 
+  summarize(count = n()) %>% 
+  filter(n > 1) %>% print(.) -> df_tmp
+print(sum(df_tmp$count))
+
+df %>%
+  select(File, Idx, software_citation_type, reference_missing, article_missing, source) %>%
+  filter(source == 'SEM') %>%
+  distinct() %>%
+  filter(!(reference_missing | article_missing)) %>% 
+  group_by(software_citation_type) %>% 
+  summarize(n = n())
+
+# Removing duplicate entries 
+df %<>%
+  mutate(source = factor(source, levels=c("TXT", "XML", "CRO", "SEM"))) %>%
+  mutate(completeness_count=Creator*2 + Name*4 + Archive*4 + ID*4 + URL*2 + 
+           PubDate_exact*2 + PubDate_year + Version*2 + Type_of_citation * 0.5 + 
+           Description * 0.5 + Date_of_access) %>%
+  group_by(source, File, Idx) %>%
+  slice_max(order_by=completeness_count, with_ties=F) %>%
+  ungroup() %>%
+  select(-completeness_count)
+```
+
+Next, we analyze the number of cases where wrong information is introduced by a database that does not stand in relation to the original information provided in the formal citation.
+
+```{r}
+# Number of wrong information added
+df %>% 
+  filter(source %in% c('CRO', 'SEM')) %>%
+  filter(!(reference_missing | article_missing)) %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type %in% c('Website', 'Other'), 
+    'Direct', 
+    software_citation_type)) %>%
+  group_by(source, software_citation_type) %>% 
+  mutate(n_total=n()) %>% 
+  filter(wrong_content > 0) %>%
+  select(source, software_citation_type, n_total, File, Idx, wrong_content) %>%
+  group_by(source, software_citation_type, n_total) %>%
+  summarize(n_references=n()) %>% 
+  mutate(rel_references = n_references / n_total) %>%
+  mutate(MoE = sqrt((rel_references * (1-rel_references))/n_total) * 1.96) %>%
+  mutate(CIu = rel_references + MoE, CIl = rel_references-MoE)  %>%
+  mutate(rel_references = rel_references*100, 
+         CIu=CIu*100, 
+         CIl=pmax(0, CIl*100)) %>% 
+  mutate(CIu = pmin(CIu, 100), CIl = pmax(CIl, 0)) 
+
+# Number of duplicate information added
+df %>%
+  filter(!(reference_missing | article_missing)) %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type %in% c('Website', 'Other'), 
+    'Direct', 
+    software_citation_type)) %>%
+  group_by(source, software_citation_type) %>% 
+  mutate(n_total=n()) %>% 
+  filter(duplicate > 0) %>%
+  select(source, software_citation_type, n_total, File, Idx, duplicate) %>%
+  group_by(source, software_citation_type, n_total) %>%
+  summarize(n_references=n()) %>% 
+  mutate(rel_references = n_references / n_total) %>%
+  mutate(MoE = sqrt((rel_references * (1-rel_references))/n_total) * 1.96) %>%
+  mutate(CIu = rel_references + MoE, CIl = rel_references-MoE)  %>%
+  mutate(rel_references = rel_references*100, 
+         CIu=CIu*100, 
+         CIl=pmax(0, CIl*100)) %>% 
+  mutate(CIu = pmin(CIu, 100), CIl = pmax(CIl, 0)) 
+
+# Overlap between wrong and duplicate
+df %>% 
+  filter(wrong_content > 0 & duplicate > 0) %>%
+  select(source, software_citation_type, File, Idx, wrong_content, duplicate)
+
+```
+
+Assessing the number of missing references in order to determine if software references are systematically missing from a database.
+
+```{r}
+df_software_article %>%
+  pivot_longer(c(cro_status, sem_status), 
+               names_to = 'source', 
+               values_to = 'missing') %>%
+  mutate(source = ifelse(source == 'sem_status', 'SEM', 'CRO')) %>%
+  mutate(software_citation_type = 'Article') %>%
+  rename(File=paper, Idx=citation) -> df_tmp
+
+df %>%
+  select(File, Idx, source, missing, software_citation_type) %>%
+  filter(source %in% c('CRO', 'SEM')) -> df_tmp_2
+
+df_tmp <- bind_rows(df_tmp, df_tmp_2)
+df_tmp %>%
+  filter(missing != 'article_missing') %>% 
+  mutate(software_citation_type = ifelse(
+    software_citation_type %in% c('Website', 'Other'), 
+    'Direct', 
+    software_citation_type)) %>%
+  group_by(software_citation_type, source) %>%
+  mutate(n_total=n()) %>%
+  group_by(software_citation_type, source, missing, n_total) %>%
+  summarize(n=n()) %>%
+  mutate(rel = n / n_total) %>% 
+  mutate(MoE = sqrt((rel * (1-rel))/n_total) * 1.96) %>%
+  mutate(CIu = rel + MoE, CIl = rel-MoE)  %>%
+  mutate(rel = rel*100, CIu=CIu*100, CIl=pmax(0, CIl*100)) %>% 
+  mutate(CIu = pmin(CIu, 100), CIl = pmax(CIl, 0)) #%>%
+  #filter(missing == 'reference_missing')
+
+df_tmp %>%
+  filter(missing != 'article_missing') %>% 
+  filter(source == 'SEM') %>%
+  filter(software_citation_type != 'Manual') %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type %in% c('Direct', 'Manual', 'Website', 'Other'), 
+    1, 
+    0)) %>%
+  mutate(missing = ifelse(missing == 'covered', 1, 0)) -> df_test
+
+# Performing a Chi-sq test to assess if direct software citations and 
+# software articles (represented as regular articles) are missing with 
+# different frequency from Semantic Scholar, to analyze if there is a 
+# systematic bias. And asssesing the extend of the effect. 
+nrow(df_test)
+chisq.test(df_test$missing, df_test$software_citation_type)
+cramerV(df_test$missing, df_test$software_citation_type)
+cohenW(df_test$missing, df_test$software_citation_type)
+
+df_tmp %>%
+  filter(missing != 'article_missing') %>% 
+  filter(source == 'CRO') %>%
+  filter(software_citation_type != 'Manual') %>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type %in% c('Direct', 'Manual', 'Website', 'Other'), 
+    1, 
+    0)) %>%
+  mutate(missing = ifelse(missing == 'covered', 1, 0)) -> df_test
+
+# Performing a Chi-sq test to assess if direct software citations and 
+# software articles (represented as regular articles) are missing with 
+# different frequency from Crossref, to analyze if there is a 
+# systematic bias. And asssesing the extend of the effect.
+nrow(df_test)
+chisq.test(df_test$missing, df_test$software_citation_type)
+cramerV(df_test$missing, df_test$software_citation_type)
+cohenW(df_test$missing, df_test$software_citation_type)
+```
+
+Now, the availability, structure, and correctness of representation is investigated for all provided information individually.
+
+First, the representation with respect to version numbers is analyzed.
+
+```{r}
+# Setting up helper function and coloring scheme
+drei <- function(available, attribute, string='S', missing=F){
+  factor(
+    ifelse(missing, "M", 
+           ifelse(!available, "NA", 
+                  ifelse(attribute, "US", string))))
+}
+vier <- function(missing, attribute, wrong, incomplete, place){
+  factor(
+    ifelse(missing, 'M', 
+           ifelse(!attribute, 'NA', 
+                  ifelse(wrong, 'E', 
+                         ifelse(incomplete, 'E', 
+                                ifelse(place, 'E', 'C'))))))
+}
+col_vector = c('#e0c2cd', '#a6bae1', '#fdcb97', '#bee383', '#e5d8bd', '#fcbbbb')
+col_vector_flow = c('#a6bae1', '#fdcb97', '#bee383')
+
+# Transformations for all following analyses
+df %<>%
+  mutate(software_citation_type = ifelse(
+    software_citation_type %in% c('Website', 'Other'),
+    'Direct', 
+    software_citation_type)) %>%
+  mutate(missing = ifelse(missing == 'covered', F, T)) %>%
+  mutate(source = fct_recode(source, "JATS"="XML")) %>%
+  mutate(source = factor(source, levels=c("JATS", "CRO", "SEM"))) %>%
+  filter(source!="TXT") %>%
+  mutate(id=paste0(File,Idx))
+
+create_alluvial <- function(df, col_v1, col_vf1, col_v2, col_vf2, labels, title){
+  df %>%
+    filter(source == 'JATS') %>%
+    mutate(fill = value) %>% 
+    select(id, fill) -> df_col
+  
+  df %>% 
+    inner_join(df_col, by='id') %>%
+    mutate(source=factor(source, 
+                         levels=c("CRO", "JATS", "SEM", 'CRO_ERR', 'SEM_ERR'))) %>% 
+    mutate(software_citation_type = ifelse(
+      software_citation_type != 'Manual', 'Direct', 'Manual')) -> 
+    df_plot
+  
+  df_plot <- split(df_plot, df_plot$software_citation_type)
+  
+  alluvial(df_plot$Direct
+           , key = source
+           , value = value
+           , id = id
+           , fill = fill
+           , order_levels_value = c('M', 'NA', 'US', 'S', 'C', 'E')
+           , order_levels_key = c('CRO_ERR', 'CRO', 'JATS', 'SEM', 'SEM_ERR')
+           , col_vector_flow = col_vf1
+           , col_vector_value = col_v1 
+           , stratum_labels = T
+           , stratum_label_size = 4.5
+           , auto_rotate_xlabs = F
+           , labels = labels
+           , title = title
+           , facet_name = "Direct Software Citation"
+  ) -> p_out_1
+  
+  alluvial(df_plot$Manual
+           , key = source
+           , value = value
+           , id = id
+           , fill = fill
+           , order_levels_value = c('M', 'NA', 'US', 'S', 'C', 'E')
+           , order_levels_key = c('CRO_ERR', 'CRO', 'JATS', 'SEM', 'SEM_ERR')
+           , col_vector_flow = col_vf2
+           , col_vector_value = col_v2 
+           , stratum_label_size = 4.5
+           , stratum_labels = T
+           , auto_rotate_xlabs = F
+           , facet_name = "Citation to Manual", 
+  ) -> p_out_2
+  
+  return(p_out_1 / p_out_2)
+}
+```
+
+Plotting the results:
+
+```{r, fig.width=11, fig.height=10}
+df %>%
+  mutate(Version_info = drei(Version, 
+                             `Version<>unstructured`, 
+                             string='S', 
+                             missing=missing)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) -> 
+  data_long
+
+df %>%
+  mutate(Version_info = vier(missing, 
+                             Version, 
+                             `Version<>wrong_content`, 
+                             `Version<>incomplete_content`, 
+                             `Version<>wrong_place`)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  filter(source != 'JATS') %>%
+  mutate(source = recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=Version_info)
+
+p <- create_alluvial(data_long, 
+                     col_vector[c(1,2,4,3,6,5)], 
+                     col_vector_flow[c(1,3,2)], 
+                     col_vector[c(1,2,3,4,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     labels=c("not available (NA)", 
+                              "structured (S)", 
+                              "missing (M)", 
+                              "correct (C)", 
+                              "error (E)", 
+                              "unstructured (US)"), 
+                     title = "Version representation across databases")
+
+ggsave('db_version.jpg', p, width = 9, height = 5)
+
+p <- p + labs(caption="Fig S6 (Article Fig 10): Adapted alluvial plot illustrating 
+        the availability, structure, and correctness of software version 
+        representations within Direct Software Citations. The results 
+        for availability and structure for the publisher's JATS in the 
+        middle column are compared to the results for Crossref (CRO) on 
+        the left, Semantic Scholar (SEM) on the right. The outermost 
+        columns show the correctness for Crossref (CRO_ERR) on the left 
+        and Semantic Scholar on the right (SEM_ERR). Missing samples in 
+        Crossref and Semantic Scholar are added in all columns for 
+        completeness.")
+print(p)
+
+get_main_numbers <- function(df, name){
+  df %>% 
+    group_by(source, value, software_citation_type) %>% 
+    summarize(n=n()) %>% 
+    filter(value != 'M') %>%
+    group_by(source, software_citation_type) %>%
+    mutate(n_total = sum(n)) %>%
+    ungroup() %>%
+    separate(source, into=c('source', 'error'), '_', fill = "right") %>%
+    mutate(error = ifelse(is.na(error), 'none', error)) %>%
+    mutate(source = as.character(source)) %>%
+    pivot_wider(names_from = value, values_from=n) -> df_tmp
+  
+  df_tmp <- split(df_tmp, df_tmp$error)
+  df_tmp$ERR %>% select(-c(S, US, error)) -> df_tmp_2
+  df_tmp$none %>% select(-c(C, E, error)) %>%
+    left_join(df_tmp_2, by=c('source', 
+                             'software_citation_type', 
+                             'n_total', 
+                             'NA')) %>%
+    mutate(`NA %` = round(`NA` / n_total * 100, 1),
+           `S %` = round(`S` / n_total * 100, 1),
+           `US %` = round(`US` / n_total * 100, 1),
+           `C %` = round(`C` / n_total * 100, 1),
+           `E %` = round(`E` / n_total * 100, 1)) %>%
+    mutate(`Meta-data` = name) -> df_out
+  
+  return(df_out)
+}
+
+df_table <- get_main_numbers(data_long, "Version")
+
+#cat(software_version(data_long, df))
+```
+
+Name:
+
+```{r, fig.width=11, fig.height=8.5}
+df %>% 
+  mutate(Name_info = drei(Name, 
+                          `Name<>unstructured`,
+                          string='S', 
+                          missing=missing)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) -> 
+  data_long
+
+df %>%
+  mutate(Name_info = vier(missing, 
+                          Name, 
+                          `Name<>wrong_content`, 
+                          `Name<>incomplete_content`, 
+                          `Name<>wrong_place`)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  filter(source != 'JATS') %>%
+  mutate(source =  recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=Name_info)
+
+p <- create_alluvial(data_long, 
+                     col_vector[c(1,2,4,3,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     col_vector[c(1,2,4,3,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     labels=c("not available (NA)", 
+                              "structured (S)", 
+                              "missing (M)", 
+                              "correct (C)", 
+                              "error (E)", 
+                              "unstructured (US)"), 
+                     title = "Software name representation across databases")
+
+ggsave('db_name.jpg', p, width = 9, height = 5)
+
+p <- p + labs(caption="Fig S7 (Article Fig 7): Alluvial plot illustrating the 
+              availability, structure, and correctness of software name 
+              representations within Direct Software Citations following the 
+              principle of Figure S6.")
+print(p)
+
+df_table <- rbind(df_table, get_main_numbers(data_long, "Name"))
+
+#cat(software_name(data_long, df))
+```
+
+Year, include information from exact date, date of access and year, in the given priority as they are semantically related and there is only few data on the first two.
+
+```{r, fig.width=11, fig.height=8.5}
+df %>% 
+  mutate(
+    date_info = as.character(drei(PubDate_exact, 
+                                  `PubDate_year<>unstructured`, 
+                                  string='S', 
+                                  missing)),
+    doa_info = as.character(drei(Date_of_access, 
+                                 `Date_of_access<>unstructured`, 
+                                 string='S', 
+                                 missing)),
+    year_info = as.character(drei(PubDate_year, 
+                                  `PubDate_year<>unstructured`, 
+                                  string='S', 
+                                  missing))) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  mutate(structure_info = ifelse(date_info!='NA', date_info, 
+                                  ifelse(doa_info!='NA', doa_info, 
+                                         year_info))) %>%
+  select(-c(date_info, doa_info, year_info)) -> data_long
+
+df %>%
+  mutate(Date_info = as.character(vier(missing, 
+                                       PubDate_exact, 
+                                       `PubDate_exact<>wrong_content`, 
+                                       `PubDate_exact<>incomplete_content`, 
+                                       `PubDate_exact<>wrong_place`)),
+         DoA_info = as.character(vier(missing, 
+                                      Date_of_access, 
+                                      `Date_of_access<>wrong_content`, 
+                                      `Date_of_access<>incomplete_content`, 
+                                      `Date_of_access<>wrong_place`)),
+         Year_info = as.character(vier(missing, 
+                                       PubDate_year, 
+                                       `PubDate_year<>wrong_content`, 
+                                       `PubDate_year<>incomplete_content`, 
+                                       `PubDate_year<>wrong_place`))) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  mutate(structure_info = ifelse(Date_info!='NA', Date_info, 
+                                  ifelse(DoA_info!='NA', DoA_info, 
+                                         Year_info))) %>%
+  filter(source != 'JATS') %>%
+  select(-c(Date_info, DoA_info, Year_info))  %>%
+  mutate(source = recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=structure_info)
+
+p <- create_alluvial(data_long, 
+                     col_vector[c(1,2,4,3,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     col_vector[c(2,1,4,3,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     labels=c("not available (NA)", 
+                              "structured (S)", 
+                              "missing (M)", 
+                              "correct (C)", 
+                              "error (E)", 
+                              "unstructured (US)"), 
+                     title = "Publication date representation across databases")
+
+ggsave('db_year.jpg', p, width = 9, height = 5)
+
+p <- p + labs(caption="Fig S8 (Article Fig 11): Alluvial plot illustrating the 
+              availability, structure, and correctness of software release date 
+              representations within Direct Software Citations following the 
+              principle of Figure S6.")
+print(p)
+
+df_table <- rbind(df_table, get_main_numbers(data_long, "Date"))
+
+#cat(software_year(data_long, df))
+```
+
+Creator:
+
+```{r, fig.width=11, fig.height=8.5}
+df %>% 
+  mutate(Creator_info = drei(Creator, 
+                             `Creator<>unstructured`, 
+                             string='S', 
+                             missing)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) -> 
+  data_long
+
+df %>%
+  mutate(Creator_info = vier(missing, 
+                             Creator, 
+                             `Creator<>wrong_content`, 
+                             `Creator<>incomplete_content`, 
+                             `Creator<>wrong_place`)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  filter(source != 'JATS') %>%
+  mutate(source =  recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=Creator_info)
+
+p <- create_alluvial(data_long, 
+                     col_vector[c(1,2,4,3,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     col_vector[c(2,1,4,3,6,5)], 
+                     col_vector_flow[c(1,3,2)], 
+                     labels=c("not available (NA)", 
+                              "structured (S)", 
+                              "missing (M)", 
+                              "correct (C)", 
+                              "error (E)", 
+                              "unstructured (US)"), 
+                     title = "Creator representation across databases")
+
+ggsave('db_creator.jpg', p, width = 9, height = 5)
+
+p <- p + labs(caption="Fig S8 (Article Fig 8): Alluvial plot illustrating the 
+              availability, structure, and correctness of software release date 
+              representations within Direct Software Citations following the 
+              principle of Figure S6.")
+print(p)
+
+df_table <- rbind(df_table, get_main_numbers(data_long, "Developer"))
+
+#cat(software_creator(data_long, df))
+```
+
+URL:
+
+```{r, fig.width=11, fig.height=8.5}
+df %>% 
+  mutate(
+    ID_info = as.character(drei(ID, 
+                                `ID<>unstructured`,
+                                string='S',
+                                missing)),
+    Archive_info = as.character(drei(Archive, 
+                                     `Archive<>unstructured`,
+                                     string='S', 
+                                     missing)),
+    URL_info = as.character(drei(URL, 
+                                 `URL<>unstructured`, 
+                                 string='S', 
+                                 missing))) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  mutate(structure_info = ifelse(ID_info!='NA', ID_info, 
+                                  ifelse(Archive_info!='NA', 
+                                         Archive_info, 
+                                         URL_info))) %>%
+  select(-c(ID_info, Archive_info, URL_info)) ->
+  data_long
+
+df %>%
+  mutate(ID_info = as.character(vier(missing, 
+                                     ID, 
+                                     `ID<>wrong_content`,
+                                     `ID<>incomplete_content`,
+                                     `ID<>wrong_place`)),
+         Archive_info = as.character(vier(missing, 
+                                          Archive, 
+                                          `Archive<>wrong_content`, 
+                                          `Archive<>incomplete_content`,
+                                          `Archive<>wrong_place`)),
+         URL_info = as.character(vier(missing,
+                                      URL,
+                                      `URL<>wrong_content`,
+                                      `URL<>incomplete_content`,
+                                      `URL<>wrong_place`))) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  mutate(structure_info = ifelse(ID_info!='NA', ID_info, 
+                             ifelse(Archive_info!='NA',
+                                    Archive_info, 
+                                    URL_info))) %>%
+  filter(source != 'JATS') %>%
+  select(-c(ID_info, Archive_info, URL_info)) %>%
+  mutate(source = recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=structure_info)
+
+p <- create_alluvial(data_long, 
+                     col_vector[c(1,2,4,3,5,6)],
+                     col_vector_flow[c(1,3,2)],
+                     col_vector[c(1,2,4,3,5,6)], 
+                     col_vector_flow[c(1,3)],
+                     labels=c("not available (NA)",
+                              "structured (S)", 
+                              "missing (M)", 
+                              "correct (C)",
+                              "error (E)", 
+                              "unstructured (US)"), 
+                     title = "Identifier representation across databases")
+
+ggsave('db_url.jpg', p, width = 9, height = 5)
+
+p <- p + labs(caption="Fig S9 (Article Fig 9): Alluvial plot illustrating the 
+              availability, structure, and correctness of software identifier 
+              representations within Direct Software Citations following the 
+              principle of Figure S6.")
+print(p)
+
+df_table <- rbind(df_table, get_main_numbers(data_long, "URL"))
+
+#cat(software_identifier(data_long, df))
+```
+
+Description:
+
+```{r, fig.width=11, fig.height=8.5}
+df %>% 
+  mutate(Description_info = drei(Description,
+                                 `Description<>unstructured`,
+                                 string='S',
+                                 missing)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) -> 
+  data_long
+
+df %>%
+  mutate(Description_info = vier(missing, 
+                                 Description, 
+                                 `Description<>wrong_content`, 
+                                 `Description<>incomplete_content`, 
+                                 `Description<>wrong_place`)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  filter(source != 'JATS') %>%
+  mutate(source =  recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=Description_info)
+
+p <- create_alluvial(data_long, 
+                     col_vector[c(1,2,4,3,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     col_vector[c(1,2,3,4,5,6)], 
+                     col_vector_flow[c(1,3,2)], 
+                     labels=c("not available (NA)", 
+                              "structured (S)",
+                              "missing (M)", 
+                              "correct (C)",
+                              "error (E)", 
+                              "unstructured (US)"), 
+                     title = "Description representation across databases")
+
+p <- p + labs(caption="Fig S10: Alluvial plot illustrating the 
+              availability, structure, and correctness of software description 
+              representations within Direct Software Citations following the 
+              principle of Figure S6.")
+print(p)
+#ggsave('db_description.jpg', p, width = 9, height = 5)
+
+#cat(software_description(data_long))
+```
+
+Type of citation:
+
+```{r, fig.width=11, fig.height=8.5}
+df %>% 
+  mutate(Type_of_citation_info = drei(Type_of_citation, 
+                                      `Type_of_citation<>unstructured`,
+                                      string='S',
+                                      missing)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) -> 
+  data_long
+
+df %>%
+  mutate(Type_of_citation_info = vier(missing,
+                                      Type_of_citation,
+                                      `Type_of_citation<>wrong_content`, 
+                                      `Type_of_citation<>incomplete_content`,
+                                      `Type_of_citation<>wrong_place`)) %>%
+  select(source, id, ends_with('_info'), software_citation_type) %>%
+  filter(source != 'JATS') %>%
+  mutate(source =  recode(source, `CRO`='CRO_ERR', `SEM`='SEM_ERR')) ->
+  data_long_2
+
+data_long <- rbind(data_long, data_long_2)
+data_long %<>% rename(value=Type_of_citation_info)
+
+p <- create_alluvial(data_long,
+                     col_vector[c(1,2,3,4,5,6)],
+                     col_vector_flow[c(1,2,3)],
+                     col_vector[c(1,2,3,5)],
+                     col_vector_flow[c(1,2)], 
+                     labels=c("not available (NA)", 
+                              "structured (S)", 
+                              "missing (M)", 
+                              "correct (C)", 
+                              "error (E)",
+                              "unstructured (US)"),
+                     title = "Type of citation representation across databases")
+
+p <- p + labs(caption="Fig S11: Alluvial plot illustrating the 
+              availability, structure, and correctness of software type of citation 
+              representations within Direct Software Citations following the 
+              principle of Figure S6.")
+print(p)
+#ggsave('db_type.jpg', p, width = 9, height = 5)
+
+#cat(software_type_of_citatin(data_long))
+```
+
+Summary table for paper:
+
+```{r}
+df_table %>%
+  select(`Meta-data`, `software_citation_type`, `source`, `n_total`, `NA`, 
+         `NA %`, `US`, `US %`, `S`, `S %`, `C`, `C %`, `E`, `E %`) %>%
+  rename(DB=`source`, Citation=`software_citation_type`, n=`n_total`) %>%
+  mutate(`Meta-data` = factor(`Meta-data`, levels=c('Name', 'URL', 'Developer',
+                                                    'Version', 'Date'))) %>%
+  mutate(`DB` = factor(`DB`, levels=c('JATS', 'CRO', 'SEM'))) %>%
+  arrange(`Meta-data`, `Citation`, `DB`) -> df_out
+
+#print(xtable(df_out), include.rownames=F)
+```
+
+```{r}
+sessionInfo()
+```
