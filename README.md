@@ -7,12 +7,14 @@ David Schindler, Tazin Hossain, Sascha Spors, and Frank Krüger
 ## Abstract of the paper
 
 Software is a central part of modern science, and knowledge of its use is crucial for the scientific community with respect to reproducibility and attribution of its developers.
-Several studies have investigated in-text mentions of software and its quality, while the quality of formal software citations has only been analysed superficially. 
+Several studies have investigated in-text mentions of software and its quality, while the quality of formal software citations has only been analyzed superficially. 
 This study performs an in-depth evaluation of formal software citation based on a set of manually annotated software references.
-It examines which resources are cited for software usage, to what extend they allow proper identification of software and its specific version---a central aspect of research provenance, how this information is made available by scientific publishers, and how well it is represented in large-scale bibliographic databases.
-The results of the investigation show that software articles are the most cited resource for software, while direct software citations are better suited for identification of software versions. 
-However, we found that current practices by both, publishers and bibliographic databases, are unsuited to represent these direct software citations, hindering large-scale analyses such as assessing software impact.
-We argue that current practices for representing software citations---the recommended way to cite software by current citation standards---stand in the way of their further adaption by the scientific community, and urge providers of bibliographic data to explicitly model scientific software. 
+It examines which resources are cited for software usage, to what extend they allow proper identification of software and its specific version, how this information is made available by scientific publishers, and how well it is represented in large-scale bibliographic databases.
+The results show that software articles are the most cited resource for software, while direct software citations are better suited for identification of software versions. 
+Moreover, we found current practices by both, publishers and bibliographic databases, to be unsuited to represent these direct software citations, hindering large-scale analyses such as assessing software impact.
+We argue that current practices for representing software citations---the recommended way to cite software by current citation standards---stand in the way of their adaption by the scientific community, and urge providers of bibliographic data to explicitly model scientific software. 
+
+A preprint of the corresponding article is available at https://arxiv.org/abs/2306.17535 
 
 ## Repository
 
